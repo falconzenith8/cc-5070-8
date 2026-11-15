@@ -13,7 +13,15 @@ export default defineConfig({
     viewport: { width: 1600, height: 1000 },
     trace: 'retain-on-failure',
     launchOptions: {
-      args: ['--use-angle=swiftshader', '--enable-webgl', '--ignore-gpu-blocklist'],
+      // Containers often ship a 64 MB /dev/shm; the software renderer then runs
+      // out of shared memory partway through a long suite and the tab crashes.
+      // Writing to /tmp instead keeps the full run stable.
+      args: [
+        '--use-angle=swiftshader',
+        '--enable-webgl',
+        '--ignore-gpu-blocklist',
+        '--disable-dev-shm-usage',
+      ],
     },
   },
   webServer: {

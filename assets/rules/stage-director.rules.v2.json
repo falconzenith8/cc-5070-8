@@ -1,0 +1,307 @@
+{
+  "schemaVersion": 2,
+  "assetId": "stage-shot-director/default",
+  "provenance": "migrated from legacy revision \"legacy\" (durations ms→s, priority order→100-order)",
+  "notes": "每个旧规则都经过条件翻译；无法表达的条件已作为 error 报告，对应规则未迁移。事件 at/duration 已换算为秒，source 保留原始毫秒值。",
+  "events": [
+    {
+      "id": "two-hander",
+      "label": "双角色对峙",
+      "scenarioId": "two-hander",
+      "at": 0,
+      "duration": 36,
+      "durationUnit": "s",
+      "source": {
+        "unit": "ms",
+        "at": 0,
+        "duration": 36000
+      }
+    },
+    {
+      "id": "crossing",
+      "label": "多人交叉",
+      "scenarioId": "crossing",
+      "at": 0,
+      "duration": 38,
+      "durationUnit": "s",
+      "source": {
+        "unit": "ms",
+        "at": 0,
+        "duration": 38000
+      }
+    },
+    {
+      "id": "occlusion",
+      "label": "关键目标被遮挡",
+      "scenarioId": "occlusion",
+      "at": 0,
+      "duration": 40,
+      "durationUnit": "s",
+      "source": {
+        "unit": "ms",
+        "at": 0,
+        "duration": 40000
+      }
+    }
+  ],
+  "policies": [
+    {
+      "id": "balanced",
+      "label": "平衡导演",
+      "description": "可见性、构图与可保持时长均衡；最短保持 2.6s，默认演出策略。",
+      "timeUnit": "s",
+      "minHoldSeconds": 2.6,
+      "switchMargin": 0.03,
+      "interruptMargin": 0.18,
+      "interruptBelowScore": 0.24,
+      "interruptBelowSeconds": 0.6,
+      "maxCutDeg": 95,
+      "allowStopDown": true,
+      "weights": {
+        "visibility": 0.5,
+        "composition": 0.32,
+        "duration": 0.18
+      },
+      "rules": [
+        {
+          "id": "dialogue-hold",
+          "label": "对白段落优先双人同框",
+          "priority": 90,
+          "conditions": [
+            {
+              "kind": "primaryAction",
+              "action": "speak"
+            },
+            {
+              "kind": "actorAction",
+              "actorId": "ivo",
+              "action": "listen"
+            }
+          ],
+          "prefer": {
+            "lens": "standard"
+          },
+          "weightBias": {
+            "visibility": 0.46,
+            "composition": 0.38
+          }
+        },
+        {
+          "id": "beat-window-guard",
+          "label": "关键遮挡窗口保住主目标",
+          "priority": 80,
+          "conditions": [
+            {
+              "kind": "beatRange",
+              "from": 12,
+              "to": 17.5
+            }
+          ],
+          "prefer": {
+            "candidateRefs": [
+              "gen:primary:-25:8:2.8",
+              "gen:primary:0:8:4.4",
+              "gen:primary:75:8:2.8"
+            ],
+            "refMode": "allow"
+          },
+          "weightBias": {
+            "visibility": 0.62,
+            "duration": 0.16
+          }
+        },
+        {
+          "id": "keep-head-clear",
+          "label": "头部被挡的机位一律不用",
+          "priority": 85,
+          "conditions": [
+            {
+              "kind": "always"
+            }
+          ],
+          "prefer": {
+            "candidateRefs": [
+              "gen:primary:-50:-12:2.8",
+              "gen:primary:25:-12:4.4"
+            ],
+            "refMode": "allow"
+          }
+        },
+        {
+          "id": "crowd-balance",
+          "label": "群戏保持整体空间关系",
+          "priority": 70,
+          "conditions": [
+            {
+              "kind": "beatLabel",
+              "contains": "尾声"
+            }
+          ],
+          "prefer": {
+            "lens": "wide"
+          },
+          "weightBias": {
+            "composition": 0.4
+          }
+        }
+      ]
+    },
+    {
+      "id": "patient",
+      "label": "长镜头导演",
+      "description": "偏好长镜头，最短保持 5s、切点更保守，适合稳定叙事。",
+      "timeUnit": "s",
+      "minHoldSeconds": 5,
+      "switchMargin": 0.075,
+      "interruptMargin": 0.26,
+      "interruptBelowScore": 0.2,
+      "interruptBelowSeconds": 1,
+      "maxCutDeg": 80,
+      "allowStopDown": true,
+      "weights": {
+        "visibility": 0.46,
+        "composition": 0.3,
+        "duration": 0.24
+      },
+      "rules": [
+        {
+          "id": "long-take",
+          "label": "长镜头段落压低切换欲望",
+          "priority": 90,
+          "conditions": [
+            {
+              "kind": "always"
+            }
+          ],
+          "weightBias": {
+            "visibility": 0.42,
+            "duration": 0.3
+          }
+        }
+      ]
+    },
+    {
+      "id": "reactive",
+      "label": "快切导演",
+      "description": "紧跟动作重点，最短保持 1.1s、切换阈值更低，会产生更多剪切。",
+      "timeUnit": "s",
+      "minHoldSeconds": 1.1,
+      "switchMargin": 0.012,
+      "interruptMargin": 0.1,
+      "interruptBelowScore": 0.3,
+      "interruptBelowSeconds": 0.35,
+      "maxCutDeg": 130,
+      "allowStopDown": true,
+      "weights": {
+        "visibility": 0.56,
+        "composition": 0.29,
+        "duration": 0.15
+      },
+      "rules": [
+        {
+          "id": "follow-speaker",
+          "label": "发言者优先单人近景",
+          "priority": 90,
+          "conditions": [
+            {
+              "kind": "primaryAction",
+              "action": "speak"
+            }
+          ],
+          "prefer": {
+            "lens": "tight"
+          }
+        }
+      ]
+    },
+    {
+      "id": "strict",
+      "label": "严格构图",
+      "description": "更重视构图质量与画面稳定，违反构图即降级；最短保持 3.4s。",
+      "timeUnit": "s",
+      "minHoldSeconds": 3.4,
+      "switchMargin": 0.05,
+      "interruptMargin": 0.2,
+      "interruptBelowScore": 0.32,
+      "interruptBelowSeconds": 0.5,
+      "maxCutDeg": 90,
+      "allowStopDown": false,
+      "weights": {
+        "visibility": 0.44,
+        "composition": 0.44,
+        "duration": 0.12
+      },
+      "rules": [
+        {
+          "id": "composition-first",
+          "label": "构图优先，牺牲可见性也可接受",
+          "priority": 90,
+          "conditions": [
+            {
+              "kind": "always"
+            }
+          ],
+          "weightBias": {
+            "visibility": 0.4,
+            "composition": 0.48
+          }
+        },
+        {
+          "id": "strict-whitelist",
+          "label": "只接受预演时确认过的机位",
+          "priority": 92,
+          "conditions": [
+            {
+              "kind": "beatLabel",
+              "contains": "Mara 中心发言"
+            }
+          ],
+          "prefer": {
+            "candidateRefs": [
+              "gen:primary:-25:8:4.4",
+              "gen:primary:retired:4.4"
+            ],
+            "refMode": "allow"
+          }
+        }
+      ]
+    }
+  ],
+  "migration": {
+    "fromVersion": "legacy",
+    "durationUnitFrom": "ms",
+    "durationUnitTo": "s",
+    "conversion": "seconds = milliseconds / 1000; priority = 100 - legacy.order",
+    "rulesMigrated": 8,
+    "rulesDropped": 2,
+    "conditionsDropped": 2,
+    "candidateRefsRetained": 7,
+    "candidateRefsMissing": [],
+    "unresolved": [
+      {
+        "code": "legacy-rule-rationale",
+        "severity": "warn",
+        "path": "policies[0].rules[2].rationale",
+        "message": "旧规则附注：原意为否决，但旧字段只列出允许机位；按白名单迁移，不扩大为黑名单。"
+      },
+      {
+        "code": "legacy-shot-approximated",
+        "severity": "warn",
+        "path": "policies[2].rules[0].prefer.lens",
+        "message": "旧 shot=\"close-up\" 没有一对一镜头档位，已映射为最接近的 tight。"
+      },
+      {
+        "code": "legacy-condition-missing-actor",
+        "severity": "error",
+        "path": "policies[2].rules[1].conditions[0]",
+        "message": "旧条件 actor-salience 缺少 actor，无法确定作用对象，规则未迁移。"
+      },
+      {
+        "code": "legacy-condition-unsupported",
+        "severity": "error",
+        "path": "policies[3].rules[1].conditions[0]",
+        "message": "旧条件 kind=\"camera-shake\" 在 v2 中没有等价表达，规则未迁移。"
+      }
+    ]
+  }
+}

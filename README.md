@@ -20,6 +20,10 @@ npm run build
 npm run preview      # http://localhost:4173
 ```
 
+> **图形界面是这个导演的主入口。** `npm run dev` 后打开 http://localhost:5173 即为镜头导演界面：
+> 选择场景与策略、开演、拖动时间轴、查看实际镜头与选择原因、导出重放日志，全部在这里完成。
+> 命令行工具（见下文「规则资产」）只是辅助，不替代界面。
+
 > 需要 WebGL。若在无 GPU 的容器/远程环境里运行，浏览器可能需加 `--use-angle=swiftshader` 使用软件渲染。
 
 ## 界面怎么用
@@ -49,6 +53,37 @@ npm run preview      # http://localhost:4173
 - **快切导演**：最短保持 1.1s，阈值更低，剪切更多（但仍不做逐帧抖动）。
 - **严格构图**：最短保持 3.4s，更重视构图稳定。
 
+## 规则资产（显式版本）
+
+候选评分与切换规则不再是散落在代码里的常量，而是一份**带版本号的配置资产**：`assets/rules/stage-director.rules.v2.json`（`schemaVersion: 2`，由 zod 在加载时校验）。运行时只消费这份资产：
+
+- 每个策略的权重、最短保持、切换余量、中断阈值、镜头偏好、条件规则都来自资产；
+- 每帧的 `ruleAssetId` / `ruleAssetVersion` / 命中的规则 / 当帧权重都会出现在决策面板和导出的重放日志里（重放 `version: 2`）；
+- 事件保留原来的 id、scenarioId 与顺序，`durationUnit` 明确为秒，并保留 `source` 原始毫秒值便于核对。
+
+### 旧演出迁移（legacy → v2）
+
+旧契约（毫秒、自由格式标签）保留在 `src/director/rules/legacy.ts`，只作为迁移来源，运行时不会直接接受它。`src/director/rules/migrate.ts` 负责转换：
+
+| 项 | 旧 | 新 |
+| --- | --- | --- |
+| 持续时间 / 窗口 | 毫秒 | 秒（在迁移边界换算一次） |
+| 规则优先级 | 数字小者优先 | `priority = 100 - order`，大者优先 |
+| 镜头档位 | `wide` / `medium` / `close-up` | `wide` / `standard` / `tight`（`close-up` 近似并告警） |
+| 无法表达的条件 | — | 报 `error`，整条规则不迁移（不做删条件的弱化） |
+
+不支持的条件（如 `camera-shake`）、缺少作用对象的条件（`actor-salience` 未指定 actor）、以及指向已不存在候选的 `allowedShots` 引用，都会在迁移报告里列明，**不会静默丢弃**。报告同时写入资产的 `migration.unresolved`，界面「重放导出」页可查看。
+
+### 命令行（仅辅助）
+
+界面是主入口；以下命令只用于干净目录或 CI 中迁移、校验、检查规则资产：
+
+```bash
+npm run rules:report      # 打印资产版本、事件（秒 + 原始 ms）、策略与全部迁移问题
+npm run rules:validate    # 校验 assets/rules/stage-director.rules.v2.json
+npm run rules:migrate     # 从旧演出重新生成 v2 资产（--out 指定输出路径）
+```
+
 ## 导演逻辑要点
 
 1. **候选生成**：围绕主目标/次目标/双人/群像锚点，在方位角 × 仰角 × 距离网格上生成固定数量的机位（每个场景 90 个左右）。每个候选都要通过机位边界、禁机位体积、实体碰撞、演员体积、距离/FOV 校验。
@@ -61,8 +96,8 @@ npm run preview      # http://localhost:4173
 
 ```bash
 npm run typecheck   # TypeScript 严格模式
-npm test            # 20 个单元测试：候选有效性、遮挡、切换策略、确定性、报告一致性
-npm run test:e2e    # 7 个端到端测试（需先 npm run build）
+npm test            # 45 个单元测试：迁移/版本契约、候选有效性、遮挡、切换策略、确定性、执行证据
+npm run test:e2e    # 13 个端到端测试（需先 npm run build）
 npm run verify      # typecheck + test + build
 ```
 
@@ -71,10 +106,13 @@ npm run verify      # typecheck + test + build
 ## 目录
 
 ```
-src/director/   导演核心（数学、场景、舞台、表演采样、候选、评分、遮挡、切换状态机、重放）
-src/render/     Three.js 舞台与节目/总览双视口
-src/ui/         侧栏面板渲染
-src/main.ts     应用、控件、时间轴、导出
-tests/unit/     导演算法测试
-tests/e2e/      界面测试
+src/director/        导演核心（数学、场景、舞台、表演采样、候选、评分、遮挡、切换状态机、重放）
+src/director/rules/  版本化规则契约、legacy 文档、迁移器、规则引擎、随包资产
+assets/rules/        带版本号的规则资产（v2 JSON）
+scripts/rules-cli.ts 辅助命令行（迁移/校验/报告）
+src/render/          Three.js 舞台与节目/总览双视口
+src/ui/              侧栏面板渲染
+src/main.ts          应用、控件、时间轴、导出
+tests/unit/          导演算法与规则迁移测试
+tests/e2e/           界面测试
 ```

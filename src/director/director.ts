@@ -7,16 +7,33 @@ import type {
   PerformanceState,
   RawCandidate,
   Scenario,
+  ScoringWeights,
   StageGeometry,
 } from './types';
 import { v3 } from './math3d';
-import { cameraOrientationDeltaDeg, DEFAULT_WEIGHTS, evaluateCandidate, type ScoringWeights, type ScoreContext } from './score';
+import { cameraOrientationDeltaDeg, evaluateCandidate, type ScoreContext } from './score';
 import { checkCameraGeometry, generateCandidates, safetyCandidate } from './candidates';
 import { samplePerformance, movingOccludersAt } from './performance';
 import { getScenario } from './scenarios';
 import { getStage } from './stage';
 import type { Occluder } from './types';
+import { SHIPPED_RULE_ASSET_RESULT } from './rules/asset';
+import type { RuleLoadResult } from './rules/schema';
+import {
+  describeCondition,
+  evaluateRules,
+  inspectCandidateRefs,
+  preferenceBonus,
+  type RuleEffect,
+  type RuleFrameContext,
+} from './rules/engine';
+import { actorVisibility } from './occlusion';
+import type { PolicyRuleSet, RuleAsset, RuleIssue } from './rules/schema';
 
+/**
+ * The runnable policy the director consumes. It is derived 1:1 from a versioned
+ * rule asset; no switching constant is authored outside the asset.
+ */
 export interface PolicyConfig {
   id: string;
   label: string;
@@ -34,56 +51,78 @@ export interface PolicyConfig {
   allowStopDown: boolean;
 }
 
-export const POLICIES: PolicyConfig[] = [
-  {
-    id: 'balanced',
-    label: '平衡导演',
-    description: '可见性、构图与可保持时长均衡；最短保持 2.6s，默认演出策略。',
-    minHoldSeconds: 2.6,
-    switchMargin: 0.03,
-    interruptMargin: 0.18,
-    interruptBelowScore: 0.24,
-    interruptBelowSeconds: 0.6,
-    maxCutDeg: 95,
-    allowStopDown: true,
-  },
-  {
-    id: 'patient',
-    label: '长镜头导演',
-    description: '偏好长镜头，最短保持 5s、切点更保守，适合稳定叙事。',
-    minHoldSeconds: 5.0,
-    switchMargin: 0.075,
-    interruptMargin: 0.26,
-    interruptBelowScore: 0.2,
-    interruptBelowSeconds: 1.0,
-    maxCutDeg: 80,
-    allowStopDown: true,
-  },
-  {
-    id: 'reactive',
-    label: '快切导演',
-    description: '紧跟动作重点，最短保持 1.1s、切换阈值更低，会产生更多剪切。',
-    minHoldSeconds: 1.1,
-    switchMargin: 0.012,
-    interruptMargin: 0.1,
-    interruptBelowScore: 0.3,
-    interruptBelowSeconds: 0.35,
-    maxCutDeg: 130,
-    allowStopDown: true,
-  },
-  {
-    id: 'strict',
-    label: '严格构图',
-    description: '更重视构图质量与画面稳定，违反构图即降级；最短保持 3.4s。',
-    minHoldSeconds: 3.4,
-    switchMargin: 0.05,
-    interruptMargin: 0.2,
-    interruptBelowScore: 0.32,
-    interruptBelowSeconds: 0.5,
-    maxCutDeg: 90,
-    allowStopDown: false,
-  },
-];
+/**
+ * Applies authored rule preferences to one evaluated candidate:
+ *  - an allow-list ref (or anchor/lens preference) adds a bounded bonus;
+ *  - a deny-list ref removes the candidate from the feasible set, with the
+ *    rule id recorded so the diagnostics can explain the rejection.
+ * Rules never mutate geometry, camera pose or measured features.
+ */
+const applyRuleOutcome = (ev: CandidateEvaluation, effect: RuleEffect): CandidateEvaluation => {
+  const denied = effect.deny.get(ev.id);
+  const bonus = preferenceBonus(ev, effect.preferences);
+  if (bonus === 0 && !denied) return ev;
+
+  const ruleIds = effect.preferences
+    .filter((p) => p.rule.prefer && preferenceBonus(ev, [p]) > 0)
+    .map((p) => p.matched.id);
+  const scores = { ...ev.scores, total: Math.max(0, Math.min(1, ev.scores.total + bonus)) };
+  const out: CandidateEvaluation = { ...ev, scores };
+  if (bonus > 0) out.ruleBonus = { amount: bonus, ruleIds };
+  if (denied) {
+    const names = denied.map((r) => r.label).join('、');
+    out.feasible = false;
+    out.rejectReason = `被规则「${names}」排除（作者指定的机位黑名单）`;
+    out.ruleDeniedBy = denied.map((r) => r.id);
+  }
+  return out;
+};
+
+const policyFromRules = (p: PolicyRuleSet): PolicyConfig => ({
+  id: p.id,
+  label: p.label,
+  description: p.description,
+  minHoldSeconds: p.minHoldSeconds,
+  switchMargin: p.switchMargin,
+  interruptMargin: p.interruptMargin,
+  interruptBelowScore: p.interruptBelowScore,
+  interruptBelowSeconds: p.interruptBelowSeconds,
+  maxCutDeg: p.maxCutDeg,
+  allowStopDown: p.allowStopDown,
+});
+
+/** The asset the runtime is built from, plus the migration issues it carries. */
+export interface LoadedRuleAsset {
+  asset: RuleAsset;
+  issues: RuleIssue[];
+  migrated: boolean;
+  sourceVersion: string;
+  /** Per-scenario stale candidate reference report, populated on demand. */
+  candidateRefIssues: RuleIssue[];
+}
+
+/**
+ * Builds a runtime asset from any loaded result. The default is the checked-in
+ * v2 asset; passing a legacy document runs the same code path the migration CLI
+ * uses, so the old show can be exercised end to end.
+ */
+export const buildRuntimeAsset = (result: RuleLoadResult = SHIPPED_RULE_ASSET_RESULT): LoadedRuleAsset => ({
+  asset: result.asset,
+  issues: result.issues,
+  migrated: result.migrated,
+  sourceVersion: result.sourceVersion,
+  candidateRefIssues: [],
+});
+
+const RUNTIME = buildRuntimeAsset();
+
+export const RULE_ASSET: RuleAsset = RUNTIME.asset;
+export const RULE_ASSET_ISSUES: RuleIssue[] = RUNTIME.issues;
+export const RULE_ASSET_SOURCE = RUNTIME.sourceVersion;
+export const RULE_ASSET_MIGRATED = RUNTIME.migrated;
+
+/** Policies exposed to the UI, in authored order. */
+export const POLICIES: PolicyConfig[] = RULE_ASSET.policies.map(policyFromRules);
 
 export const getPolicy = (id: string): PolicyConfig => {
   const p = POLICIES.find((x) => x.id === id);
@@ -91,21 +130,33 @@ export const getPolicy = (id: string): PolicyConfig => {
   return p;
 };
 
-export const WEIGHTS_BY_POLICY: Record<string, ScoringWeights> = {
-  balanced: DEFAULT_WEIGHTS,
-  patient: { visibility: 0.46, composition: 0.3, duration: 0.24 },
-  reactive: { visibility: 0.56, composition: 0.29, duration: 0.15 },
-  strict: { visibility: 0.44, composition: 0.44, duration: 0.12 },
+export const getPolicyRuleSet = (id: string): PolicyRuleSet => {
+  const p = RULE_ASSET.policies.find((x) => x.id === id);
+  if (!p) throw new Error(`unknown rule set: ${id}`);
+  return p;
 };
+
+/** Base weights, before per-frame rule bias. */
+export const WEIGHTS_BY_POLICY: Record<string, ScoringWeights> = Object.fromEntries(
+  RULE_ASSET.policies.map((p) => [p.id, { ...p.weights }]),
+);
 
 export interface DirectorOptions {
   scenario: Scenario;
   stage: StageGeometry;
   policy: PolicyConfig;
+  /** Policy rule set the switching constants came from. */
+  rules: PolicyRuleSet;
+  /** Base weights for this policy; rule bias is applied per frame. */
   weights: ScoringWeights;
   aspect: number;
   /** Internal tick used for hold timing (seconds of performance time). */
   tickSeconds: number;
+  /**
+   * Stale candidate references detected for this scenario. Reported on the
+   * frame, never silently ignored.
+   */
+  candidateRefIssues?: RuleIssue[];
 }
 
 export interface DirectorState {
@@ -181,8 +232,11 @@ const reasonForCandidate = (c: CandidateEvaluation, perf: PerformanceState): str
   else if (c.anchor === 'two-shot') bits.push('双人同框，保住对话关系');
   else if (c.frameTarget === perf.primaryId) bits.push(`对准主目标 ${primary?.name ?? ''}`);
   else {
+    // Name the subject, not a cause: this shot may still win while the primary
+    // is perfectly shootable (e.g. a rule prefers the partner), and claiming
+    // "primary unavailable" there would be a false account of the decision.
     const name = perf.actors.find((a) => a.id === c.frameTarget)?.name ?? c.frameTarget;
-    bits.push(`主目标不可用，转向次目标 ${name}`);
+    bits.push(`对准次目标 ${name}`);
   }
   bits.push(
     `可见性 ${(c.scores.visibility * 100).toFixed(0)} / 构图 ${(c.scores.composition * 100).toFixed(
@@ -208,7 +262,7 @@ export const tickDirector = (
   opts: DirectorOptions,
   input: DirectorTickInput,
 ): DirectorFrame => {
-  const { scenario, stage, policy, weights, aspect } = opts;
+  const { scenario, stage, policy, aspect } = opts;
   const perf = samplePerformance(scenario, input.time);
   const occluders = occludersAt(stage, scenario.id, input.time);
   const occCache = new Map<number, Occluder[]>();
@@ -233,20 +287,36 @@ export const tickDirector = (
   const rawGen = generateCandidates({ scenario, stage, perf, occluders, aspect });
   const rawSafety = safetyCandidate(stage, perf, occluders);
 
+  // Resolve the versioned rules before scoring: weights, authored preferences
+  // and deny-lists are inputs to the evaluation, not post-hoc commentary.
+  const rawGeometryChecks = rawGen.map((raw) => checkCameraGeometry(raw.cam, stage, perf, occluders));
+  const primaryActor = perf.actors.find((a) => a.id === perf.primaryId);
+  const primaryVisible = Boolean(
+    primaryActor &&
+      rawGen.some((raw, i) => {
+        if (!rawGeometryChecks[i].valid || !raw.targets.includes(perf.primaryId)) return false;
+        const vis = actorVisibility(raw.cam.pos, primaryActor.pos, primaryActor.height, primaryActor.radius, occluders);
+        return vis.frac >= 0.2;
+      }),
+  );
+  const ruleFrame: RuleFrameContext = { scenario, perf, primaryVisible };
+  const ruleEffect: RuleEffect = evaluateRules(opts.rules, ruleFrame);
+
   const scoreCtx: ScoreContext = {
     scenario,
     stage,
     perf,
     occluders,
     aspect,
-    weights,
+    weights: ruleEffect.weights,
     occludersFor,
     perfMemo,
   };
 
-  const candidates: CandidateEvaluation[] = rawGen.map((raw) =>
-    evaluateCandidate(raw, scoreCtx, checkCameraGeometry(raw.cam, stage, perf, occluders)),
-  );
+  const candidates: CandidateEvaluation[] = rawGen.map((raw, i) => {
+    const ev = evaluateCandidate(raw, scoreCtx, rawGeometryChecks[i]);
+    return applyRuleOutcome(ev, ruleEffect);
+  });
   const safetyEval = evaluateCandidate(
     rawSafety,
     scoreCtx,
@@ -263,7 +333,12 @@ export const tickDirector = (
     (c) => c.targets.includes(perf.primaryId) && c.features.primaryVisibility >= 0.2,
   );
 
-  const warnings: DirectorWarning[] = [];
+  const ruleWarnings: DirectorWarning[] = (opts.candidateRefIssues ?? []).map((issue) => ({
+    code: issue.code,
+    severity: issue.severity === 'error' ? 'error' : 'warn',
+    message: issue.message,
+  }));
+  const warnings: DirectorWarning[] = [...ruleWarnings];
   const onAir = state.onAir;
   const age = onAir ? perf.time - onAir.startedAt : 0;
   // Leaving a fallback is a recovery, not a re-frame: when the primary is
@@ -276,7 +351,7 @@ export const tickDirector = (
   const recovery = onAir && onAir.role === 'safety' && primaryAvailable ? bestPrimary : null;
   // Re-score the live shot at its frozen pose. It is NOT permitted to silently
   // re-aim: if the actor walks out, the score must fall honestly.
-  const onAirEval = onAir ? evaluateOnAirShot(onAir, scoreCtx, stage) : null;
+  const onAirEval = onAir ? evaluateOnAirShot(onAir, scoreCtx, stage, ruleEffect) : null;
   const liveScore = onAirEval ? onAirEval.scores.total : 0;
 
   let decision: DirectorDecision;
@@ -545,10 +620,18 @@ export const tickDirector = (
         )}s，暂不切换以免抖动`,
       );
     } else if (canHold) {
+      // Say which gate actually held the shot. Claiming "未达切换余量" when the
+      // gain plainly exceeds it (but the minimum hold has not elapsed) makes
+      // the panel contradict its own numbers.
+      const gained = Math.max(0, gain);
       decision = keeper(
         'hold',
         `保持镜头 ${age.toFixed(1)}s / 最短 ${policy.minHoldSeconds}s${
-          challenger ? `；挑战者领先 ${(gain * 100).toFixed(1)} 分，未达切换余量 ${(switchMarginEffective * 100).toFixed(1)} 分` : '；无更优候选'
+          challenger
+            ? gained >= switchMarginEffective
+              ? `；挑战者领先 ${(gained * 100).toFixed(1)} 分已超过切换余量 ${(switchMarginEffective * 100).toFixed(1)} 分，但最短保持未满`
+              : `；挑战者领先 ${(gained * 100).toFixed(1)} 分，未达切换余量 ${(switchMarginEffective * 100).toFixed(1)} 分`
+            : '；无更优候选'
         }`,
       );
     } else if (challenger && orientation > policy.maxCutDeg) {
@@ -569,9 +652,9 @@ export const tickDirector = (
     // Distinguish "nothing can see the primary" from "the primary is visible but
     // no candidate is a usable shot of it". Claiming invisibility when the
     // program picture plainly shows the actor would be a lie on the panel.
-    const primaryVisibleSomewhere = candidates.some(
-      (c) => c.geomValid && c.targets.includes(perf.primaryId) && c.features.primaryVisibility >= 0.2,
-    );
+    // `primaryVisible` is the weight-independent measurement taken above, so
+    // this sentence cannot be manufactured by a scoring change.
+    const primaryVisibleSomewhere = primaryVisible;
     const name = primary?.name ?? perf.primaryId;
     warnings.push({
       code: 'primary-unavailable',
@@ -583,6 +666,18 @@ export const tickDirector = (
           : `主目标 ${name} 不可见且无替位。`,
     });
   }
+
+  // Authored rule trace: which rules matched, and the concrete values that made
+  // them match. Rendered in the panel so a shot's stated reason is checkable.
+  const ruleTrace = ruleEffect.matched.map((m) => {
+    const rule = opts.rules.rules.find((r) => r.id === m.id)!;
+    return {
+      id: m.id,
+      label: m.label,
+      priority: m.priority,
+      conditions: rule.conditions.map(describeCondition),
+    };
+  });
 
   state.onAir = nextOnAir;
   const frame: DirectorFrame = {
@@ -605,6 +700,10 @@ export const tickDirector = (
     policyLabel: policy.label,
     safety: safetyEval,
     switchesThisRun: state.switcheCount,
+    ruleAssetId: RULE_ASSET.assetId,
+    ruleAssetVersion: RULE_ASSET.schemaVersion,
+    rules: ruleTrace,
+    scoringWeights: ruleEffect.weights,
   };
 
   state.lastFrame = frame;
@@ -620,6 +719,7 @@ export const evaluateOnAirShot = (
   shot: OnAirShot,
   ctx: ScoreContext,
   stage: StageGeometry,
+  effect?: RuleEffect,
 ): CandidateEvaluation => {
   const perf = ctx.perf;
   const target = perf.actors.find((a) => a.id === shot.targetActor);
@@ -641,8 +741,11 @@ export const evaluateOnAirShot = (
   };
   const geom = checkCameraGeometry(raw.cam, stage, perf, ctx.occluders);
   const ev = evaluateCandidate(raw, ctx, geom);
+  // Challengers are scored after rule adjustments; the incumbent must be too,
+  // or the reported live score and the switch margin would use different scales.
+  const adjusted = effect ? applyRuleOutcome(ev, effect) : ev;
   // Preserve the original identity/role for display.
-  return { ...ev, label: shot.label, id: shot.sourceCandidateId };
+  return { ...adjusted, label: shot.label, id: shot.sourceCandidateId };
 };
 
 /** Offline convenience for tests/timelines: build an options bundle from ids. */
@@ -655,12 +758,17 @@ export const optionsFor = (
   const scenario = getScenario(scenarioId);
   const stage = getStage(scenarioId);
   const policy = getPolicy(policyId);
+  const rules = getPolicyRuleSet(policyId);
   return {
     scenario,
     stage,
     policy,
-    weights: WEIGHTS_BY_POLICY[policyId] ?? DEFAULT_WEIGHTS,
+    rules,
+    weights: { ...rules.weights },
     aspect,
     tickSeconds,
+    // Stale authored candidate refs are scenario-dependent, so they are
+    // measured here and reported on every frame of the run.
+    candidateRefIssues: inspectCandidateRefs(RULE_ASSET, scenario, stage),
   };
 };

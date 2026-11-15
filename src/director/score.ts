@@ -362,6 +362,12 @@ export const evaluateCandidate = (
       // usable shot, even if the body samples happen to peek around it.
       feasible = false;
       rejectReason = `出镜目标头部被「${frameTarget.visibility.nearestBlockerId ?? '几何体'}」挡住`;
+    } else if (!isGroup && frameTarget && !frameTarget.headInFrame) {
+      // Visible but projected outside the frame is not a shot of that subject.
+      // Rules may reorder candidates; they must never make an unframed face
+      // selectable.
+      feasible = false;
+      rejectReason = '出镜目标头部落在画面外';
     } else if (targetVisAvg < 0.28) {
       feasible = false;
       rejectReason = '目标可见面积不足';

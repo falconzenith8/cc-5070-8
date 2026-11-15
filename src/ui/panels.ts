@@ -1,4 +1,11 @@
-import type { CandidateEvaluation, DirectorDecision, DirectorFrame, DirectorWarning } from '../director/types';
+import type {
+  CandidateEvaluation,
+  DirectorDecision,
+  DirectorFrame,
+  DirectorWarning,
+  RuleTraceEntry,
+} from '../director/types';
+import type { RuleAsset, RuleIssue } from '../director/rules/schema';
 
 export const DECISION_LABELS: Record<DirectorDecision['type'], { label: string; cls: string }> = {
   start: { label: '开演首个镜头', cls: 'ok' },
@@ -52,6 +59,21 @@ export const candidateRow = (c: CandidateEvaluation, onAirId: string | null, sel
         <span>正脸 ${(c.features.faceScore * 100).toFixed(0)}%</span>
         <span>主目标可见 ${(c.features.primaryVisibility * 100).toFixed(0)}%</span>
       </div>
+      ${
+        c.ruleBonus || (c.ruleDeniedBy && c.ruleDeniedBy.length > 0)
+          ? `<div class="cand-rules">${
+              c.ruleBonus
+                ? `<span class="rk ok">规则偏好 +${(c.ruleBonus.amount * 100).toFixed(1)}（${escapeHtml(
+                    c.ruleBonus.ruleIds.join('、'),
+                  )}）</span>`
+                : ''
+            }${
+              c.ruleDeniedBy && c.ruleDeniedBy.length > 0
+                ? `<span class="rk bad">规则排除（${escapeHtml(c.ruleDeniedBy.join('、'))}）</span>`
+                : ''
+            }</div>`
+          : ''
+      }
     </button>`;
 };
 
@@ -62,7 +84,72 @@ export interface Diagnostics {
   cardHtml: string;
   metaHtml: string;
   warningsHtml: string;
+  rulesHtml: string;
 }
+
+const renderRuleTrace = (rules: RuleTraceEntry[]): string => {
+  if (rules.length === 0) {
+    return `<p class="no-warn">本帧没有匹配任何作者规则，使用策略基线权重。</p>`;
+  }
+  return rules
+    .map(
+      (r) => `<div class="rule-row">
+        <div class="rule-head"><span class="rule-prio">P${r.priority}</span><b>${escapeHtml(r.label)}</b>
+          <code>${escapeHtml(r.id)}</code></div>
+        <div class="rule-cond">${r.conditions.map((c) => `<span>${escapeHtml(c)}</span>`).join('')}</div>
+      </div>`,
+    )
+    .join('');
+};
+
+export interface MigrationReport {
+  asset: RuleAsset;
+  issues: RuleIssue[];
+  sourceVersion: string;
+  migrated: boolean;
+  extraIssues?: RuleIssue[];
+}
+
+/** Renders the rule asset's identity, units and every unresolved migration item. */
+export const renderMigrationReport = (report: MigrationReport): string => {
+  const { asset, issues, sourceVersion, migrated } = report;
+  const all = [...issues, ...(report.extraIssues ?? [])];
+  const m = asset.migration;
+  const issueHtml =
+    all.length === 0
+      ? '<p class="no-warn">没有未解决的迁移项。</p>'
+      : all
+          .map(
+            (i) =>
+              `<p class="${i.severity === 'error' ? 'w-error' : i.severity === 'warn' ? 'w-warn' : 'w-info'}">[${i.severity}] ${escapeHtml(
+                i.code,
+              )}<br><span class="path">${escapeHtml(i.path || '(root)')}</span><br>${escapeHtml(i.message)}</p>`,
+          )
+          .join('');
+  return `
+    <div class="mig-grid">
+      <div><span>资产</span><b>${escapeHtml(asset.assetId)}</b></div>
+      <div><span>版本</span><b>v${asset.schemaVersion}${migrated ? ` ← ${escapeHtml(sourceVersion)}` : ''}</b></div>
+      <div><span>持续时间单位</span><b>${m ? `${escapeHtml(m.durationUnitFrom)} → ${escapeHtml(m.durationUnitTo)}` : 's'}</b></div>
+      <div><span>规则迁移</span><b>${m ? `保留 ${m.rulesMigrated} / 丢弃 ${m.rulesDropped} / 条件丢弃 ${m.conditionsDropped}` : '未迁移'}</b></div>
+      <div><span>候选引用</span><b>${m ? `${m.candidateRefsRetained} 条，缺失 ${m.candidateRefsMissing.length}` : '—'}</b></div>
+      <div><span>事件</span><b>${asset.events.length} 个（单位 ${asset.events[0]?.durationUnit ?? 's'}）</b></div>
+    </div>
+    <h3>事件序列（持续时间单位 s）</h3>
+    <ul class="event-list">
+      ${asset.events
+        .map(
+          (e) =>
+            `<li><b>${escapeHtml(e.id)}</b> ${escapeHtml(e.label)} · ${e.scenarioId} · @${e.at}s +${e.duration}s${
+              e.source ? `<span class="src">（原始 ${e.source.at}ms + ${e.source.duration}ms）</span>` : ''
+            }</li>`,
+        )
+        .join('')}
+    </ul>
+    <h3>未解决 / 近似迁移项</h3>
+    ${issueHtml}
+  `;
+};
 
 export const buildDiagnostics = (f: DirectorFrame): Diagnostics => {
   const d = DECISION_LABELS[f.decision.type];
@@ -90,6 +177,9 @@ export const buildDiagnostics = (f: DirectorFrame): Diagnostics => {
       }</em></b></div>
       <div><span>主目标可达</span><b class="${f.primaryAvailable ? 'ok-t' : 'bad-t'}">${f.primaryAvailable ? '是' : '否'}</b></div>
       <div><span>策略</span><b>${escapeHtml(f.policyLabel)}</b></div>
+      <div><span>规则权重</span><b>可 ${(f.scoringWeights.visibility * 100).toFixed(0)} / 构 ${(
+        f.scoringWeights.composition * 100
+      ).toFixed(0)} / 持 ${(f.scoringWeights.duration * 100).toFixed(0)}</b></div>
     </div>
     <div class="dec-bar">
       <div class="dec-live" style="width:${(live * 100).toFixed(1)}%"></div>
@@ -112,7 +202,7 @@ export const buildDiagnostics = (f: DirectorFrame): Diagnostics => {
       ? `<p class="no-warn">无异常：所有候选与机位均通过几何与可见性校验。</p>`
       : f.warnings.map((w) => `<p class="${warningClass(w)}">${escapeHtml(w.message)}</p>`).join('');
 
-  return { cardHtml, metaHtml, warningsHtml };
+  return { cardHtml, metaHtml, warningsHtml, rulesHtml: renderRuleTrace(f.rules) };
 };
 
 const primaryName = (f: DirectorFrame): string =>
@@ -149,11 +239,11 @@ export const cutLogItem = (time: number, type: string, interruption: string | nu
 
 export const toCsv = (log: import('../director/replay').ReplayLog): string => {
   const rows = [
-    ['shot_id', 'started_at', 'label', 'candidate_id', 'role', 'target', 'selection_reason'].join(','),
+    ['shot_id', 'started_at', 'label', 'candidate_id', 'role', 'target', 'rules', 'selection_reason'].join(','),
   ];
   for (const s of log.shots) {
     rows.push(
-      [s.shotId, s.startedAt, s.label, s.candidateId, s.role, s.target, s.selectionReason]
+      [s.shotId, s.startedAt, s.label, s.candidateId, s.role, s.target, s.selectedRules.join('|'), s.selectionReason]
         .map((v) => csvCell(String(v)))
         .join(','),
     );

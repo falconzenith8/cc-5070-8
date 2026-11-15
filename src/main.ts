@@ -3,13 +3,19 @@ import './style.css';
 import { SCENARIOS, getScenario } from './director/scenarios';
 import { getStage } from './director/stage';
 import {
+  RULE_ASSET,
+  RULE_ASSET_ISSUES,
+  RULE_ASSET_MIGRATED,
+  RULE_ASSET_SOURCE,
   createDirectorState,
   getPolicy,
+  getPolicyRuleSet,
   optionsFor,
   tickDirector,
   POLICIES,
   type DirectorState,
 } from './director/director';
+import { SHIPPED_ASSET_PROBLEMS, SHIPPED_MIGRATION_ISSUES } from './director/rules/asset';
 import type { DirectorFrame } from './director/types';
 import { createStageScene, type StageScene } from './render/stageScene';
 import { ReplayRecorder, type ReplayLog } from './director/replay';
@@ -18,6 +24,7 @@ import {
   candidateRow,
   cutLogItem,
   escapeHtml,
+  renderMigrationReport,
   shotListItem,
   toCsv,
 } from './ui/panels';
@@ -42,6 +49,13 @@ interface AppState {
 }
 
 const TICK_HZ = 60;
+
+/** Rule provenance attached to every recorded replay log. */
+const replayRuleAsset = (policyId: string) => ({
+  assetId: RULE_ASSET.assetId,
+  schemaVersion: RULE_ASSET.schemaVersion,
+  weights: { ...getPolicyRuleSet(policyId).weights },
+});
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
@@ -120,6 +134,7 @@ app.innerHTML = `
             <label class="check"><input type="checkbox" id="chk-overlay" /> 显示机位禁区/范围</label>
             <label class="check"><input type="checkbox" id="chk-candidates" /> 总览显示候选</label>
           </div>
+          <p class="rule-source" id="rule-source"></p>
         </div>
       </div>
 
@@ -141,6 +156,10 @@ app.innerHTML = `
           <div class="reason-meta" id="decision-meta"></div>
         </div>
         <div class="warnings" id="warnings"></div>
+        <div class="rule-trace">
+          <h3>命中规则（本帧）</h3>
+          <div id="rule-trace"></div>
+        </div>
         <div class="shot-history">
           <h3>镜头序列</h3>
           <ol id="shot-list"></ol>
@@ -162,6 +181,8 @@ app.innerHTML = `
           <button id="btn-export-reasons">导出镜头与理由 CSV</button>
         </div>
         <p class="hint">重放文件记录每个采样帧的候选评分、选中镜头机位与切换原因；同一条演出轨迹可离线复算比对。</p>
+        <h3>规则资产与迁移报告</h3>
+        <div class="migration-report" id="migration-report"></div>
         <h3>切换日志</h3>
         <ol class="cut-log" id="cut-log"></ol>
       </div>
@@ -197,6 +218,9 @@ const els = {
   decisionReason: document.querySelector<HTMLParagraphElement>('#decision-reason')!,
   decisionMeta: document.querySelector<HTMLDivElement>('#decision-meta')!,
   warnings: document.querySelector<HTMLDivElement>('#warnings')!,
+  ruleTrace: document.querySelector<HTMLDivElement>('#rule-trace')!,
+  ruleSource: document.querySelector<HTMLParagraphElement>('#rule-source')!,
+  migrationReport: document.querySelector<HTMLDivElement>('#migration-report')!,
   shotList: document.querySelector<HTMLOListElement>('#shot-list')!,
   candList: document.querySelector<HTMLDivElement>('#cand-list')!,
   candCount: document.querySelector<HTMLSpanElement>('#cand-count')!,
@@ -228,7 +252,7 @@ const state: AppState = {
   opts: optionsFor('two-hander', 'balanced', 16 / 9, 1 / TICK_HZ),
   scenario: getScenario('two-hander'),
   stage: getStage('two-hander'),
-  recorder: new ReplayRecorder('two-hander', 'balanced', 16 / 9, TICK_HZ),
+  recorder: new ReplayRecorder('two-hander', 'balanced', 16 / 9, TICK_HZ, replayRuleAsset('balanced')),
   lastFrame: null,
   selectedCandidateId: null,
   showRejected: true,
@@ -323,7 +347,7 @@ const fitCanvases = () => {
   const aspect = w / h;
   if (Math.abs(aspect - state.opts.aspect) > 0.002) {
     state.opts.aspect = aspect;
-    state.recorder = new ReplayRecorder(state.scenarioId, state.policyId, aspect, TICK_HZ);
+    state.recorder = new ReplayRecorder(state.scenarioId, state.policyId, aspect, TICK_HZ, replayRuleAsset(state.policyId));
     resetDirector(false);
   }
 };
@@ -423,6 +447,7 @@ const updatePanels = (frame: DirectorFrame) => {
   els.decisionCard.innerHTML = diag.cardHtml;
   els.decisionMeta.innerHTML = diag.metaHtml;
   els.warnings.innerHTML = diag.warningsHtml;
+  els.ruleTrace.innerHTML = diag.rulesHtml;
   els.decisionReason.textContent = frame.decision.reason;
 
   els.hudShot.textContent = frame.onAir ? `#${frame.onAir.shotId} ${frame.onAir.targetName}` : '黑场';
@@ -484,7 +509,25 @@ const renderReplayInfo = () => {
     <div><span>已记录采样帧</span><b>${state.recorder.frameCount}</b></div>
     <div><span>镜头数</span><b>${state.recorder.toLog().shots.length}</b></div>
     <div><span>场景 / 策略</span><b>${escapeHtml(state.scenario.name)} / ${escapeHtml(getPolicy(state.policyId).label)}</b></div>
+    <div><span>规则资产</span><b>${escapeHtml(RULE_ASSET.assetId)} v${RULE_ASSET.schemaVersion}</b></div>
   `;
+};
+
+const renderRuleSource = () => {
+  const shownIssues = SHIPPED_MIGRATION_ISSUES.length + RULE_ASSET_ISSUES.length + SHIPPED_ASSET_PROBLEMS.length;
+  els.ruleSource.innerHTML = `规则资产 <code>${escapeHtml(RULE_ASSET.assetId)}</code> v${
+    RULE_ASSET.schemaVersion
+  } · 来源 ${escapeHtml(RULE_ASSET_SOURCE)}${RULE_ASSET_MIGRATED ? '（已迁移）' : '（迁移自 legacy）'} · 迁移问题 ${shownIssues} 项`;
+  // The shipped asset persists the migration report it was produced with; the
+  // in-memory load result only carries validation problems. Show both so a
+  // dropped legacy condition can never be mistaken for a clean migration.
+  els.migrationReport.innerHTML = renderMigrationReport({
+    asset: RULE_ASSET,
+    issues: [...SHIPPED_MIGRATION_ISSUES, ...RULE_ASSET_ISSUES],
+    sourceVersion: RULE_ASSET_SOURCE,
+    migrated: RULE_ASSET_MIGRATED,
+    extraIssues: SHIPPED_ASSET_PROBLEMS,
+  });
 };
 
 const renderBeatTicks = () => {
@@ -539,7 +582,7 @@ const applyScenarioChange = (id: string) => {
   state.scenario = getScenario(id);
   state.stage = getStage(id);
   state.opts = optionsFor(id, state.policyId, state.opts.aspect, 1 / TICK_HZ);
-  state.recorder = new ReplayRecorder(id, state.policyId, state.opts.aspect, TICK_HZ);
+  state.recorder = new ReplayRecorder(id, state.policyId, state.opts.aspect, TICK_HZ, replayRuleAsset(state.policyId));
   stage3d.setScenario(id);
   els.scrub.max = state.scenario.duration.toFixed(2);
   renderBeatTicks();
@@ -551,7 +594,7 @@ const applyScenarioChange = (id: string) => {
 const applyPolicyChange = (id: string) => {
   state.policyId = id;
   state.opts = optionsFor(state.scenarioId, id, state.opts.aspect, 1 / TICK_HZ);
-  state.recorder = new ReplayRecorder(state.scenarioId, id, state.opts.aspect, TICK_HZ);
+  state.recorder = new ReplayRecorder(state.scenarioId, id, state.opts.aspect, TICK_HZ, replayRuleAsset(id));
   els.policyDesc.textContent = getPolicy(id).description;
   // Re-run from the start so switching policies never mixes histories.
   resetDirector(false);
@@ -669,6 +712,7 @@ window.addEventListener('keydown', (ev) => {
 // --- Boot ----------------------------------------------------------------
 els.policyDesc.textContent = getPolicy(state.policyId).description;
 els.scrub.max = state.scenario.duration.toFixed(2);
+renderRuleSource();
 renderBeatTicks();
 fitCanvases();
 resetDirector(false);

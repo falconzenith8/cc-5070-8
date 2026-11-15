@@ -8,6 +8,10 @@ export interface ReplayFrame {
   primary: string;
   feasibleCount: number;
   primaryAvailable: boolean;
+  /** Effective scoring weights after rule bias. */
+  weights: { visibility: number; composition: number; duration: number };
+  /** Matched authored rules and the resolved conditions that made them match. */
+  rules: { id: string; label: string; conditions: string[] }[];
   onAir: {
     shotId: number;
     candidateId: string;
@@ -38,17 +42,28 @@ export interface ReplayFrame {
     composition: number;
     duration: number;
     holdSeconds: number;
+    /** Authored rules that preferred this candidate, and any that denied it. */
+    ruleBonus: number;
+    ruleBonusBy: string[];
+    ruleDeniedBy: string[];
   }[];
   warnings: DirectorWarning[];
 }
 
 export interface ReplayLog {
-  version: 1;
+  version: 2;
   scenarioId: string;
   policyId: string;
   aspect: number;
   tickHz: number;
   recordedAt: string;
+  /** Versioned rule provenance this log was produced under. */
+  ruleAsset: {
+    assetId: string;
+    schemaVersion: number;
+    /** Base policy weights before per-frame rule bias. */
+    weights: { visibility: number; composition: number; duration: number };
+  };
   frames: ReplayFrame[];
   shots: {
     shotId: number;
@@ -58,6 +73,8 @@ export interface ReplayLog {
     startedAt: number;
     selectionReason: string;
     target: string;
+    /** Rule trace at the moment the shot was selected. */
+    selectedRules: string[];
   }[];
 }
 
@@ -70,6 +87,12 @@ export const frameToReplay = (f: DirectorFrame): ReplayFrame => ({
   primary: f.perf.primaryId,
   feasibleCount: f.feasibleCount,
   primaryAvailable: f.primaryAvailable,
+  weights: {
+    visibility: r3(f.scoringWeights.visibility),
+    composition: r3(f.scoringWeights.composition),
+    duration: r3(f.scoringWeights.duration),
+  },
+  rules: f.rules.map((r) => ({ id: r.id, label: r.label, conditions: r.conditions })),
   onAir: f.onAir
     ? {
         shotId: f.onAir.shotId,
@@ -108,6 +131,9 @@ const compactCandidate = (c: CandidateEvaluation) => ({
   composition: r3(c.scores.composition),
   duration: r3(c.scores.duration),
   holdSeconds: r3(c.features.holdSeconds),
+  ruleBonus: r3(c.ruleBonus?.amount ?? 0),
+  ruleBonusBy: c.ruleBonus?.ruleIds ?? [],
+  ruleDeniedBy: c.ruleDeniedBy ?? [],
 });
 
 /**
@@ -119,13 +145,17 @@ export class ReplayRecorder {
   private shots = new Map<number, ReplayLog['shots'][number]>();
   private lastShotId = 0;
   private startedAt = new Date().toISOString();
+  private ruleAsset: ReplayLog['ruleAsset'];
   constructor(
     readonly scenarioId: string,
     readonly policyId: string,
     readonly aspect: number,
     readonly tickHz: number,
+    ruleAsset: ReplayLog['ruleAsset'],
     private every = 2,
-  ) {}
+  ) {
+    this.ruleAsset = ruleAsset;
+  }
 
   push(f: DirectorFrame) {
     if (f.onAir && f.onAir.shotId !== this.lastShotId) {
@@ -138,6 +168,7 @@ export class ReplayRecorder {
         startedAt: r3(f.onAir.startedAt),
         selectionReason: f.onAir.selectionReason,
         target: f.onAir.targetName,
+        selectedRules: f.rules.map((r) => r.id),
       });
     }
     if (f.step % this.every === 0) this.frames.push(frameToReplay(f));
@@ -152,12 +183,13 @@ export class ReplayRecorder {
 
   toLog(): ReplayLog {
     return {
-      version: 1,
+      version: 2,
       scenarioId: this.scenarioId,
       policyId: this.policyId,
       aspect: this.aspect,
       tickHz: this.tickHz,
       recordedAt: this.startedAt,
+      ruleAsset: this.ruleAsset,
       frames: this.frames,
       shots: [...this.shots.values()].sort((a, b) => a.startedAt - b.startedAt),
     };

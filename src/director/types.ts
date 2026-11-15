@@ -144,6 +144,12 @@ export interface CandidateFeatures {
   panFromOnAirDeg: number;
 }
 
+export interface ScoringWeights {
+  visibility: number;
+  composition: number;
+  duration: number;
+}
+
 export interface CandidateEvaluation extends RawCandidate {
   geomValid: boolean;
   geomReason: string;
@@ -152,6 +158,10 @@ export interface CandidateEvaluation extends RawCandidate {
   scores: ScoreBreakdown;
   features: CandidateFeatures;
   summary: string;
+  /** Authored rules that gave this candidate a preference bonus. */
+  ruleBonus?: { amount: number; ruleIds: string[] };
+  /** Authored rule ids that removed this candidate from the feasible set. */
+  ruleDeniedBy?: string[];
 }
 
 export interface OnAirShot {
@@ -204,6 +214,14 @@ export interface DirectorWarning {
   message: string;
 }
 
+export interface RuleTraceEntry {
+  id: string;
+  label: string;
+  priority: number;
+  /** Why the rule matched: the resolved condition values for this frame. */
+  conditions: string[];
+}
+
 export interface DirectorFrame {
   time: number;
   step: number;
@@ -222,4 +240,11 @@ export interface DirectorFrame {
   policyLabel: string;
   safety: CandidateEvaluation | null;
   switchesThisRun: number;
+  /** Versioned-rule provenance for this frame. */
+  ruleAssetId: string;
+  ruleAssetVersion: number;
+  /** Rules that matched this frame, highest priority first. */
+  rules: RuleTraceEntry[];
+  /** Effective (rule-biased, normalised) weights used for scoring. */
+  scoringWeights: ScoringWeights;
 }
